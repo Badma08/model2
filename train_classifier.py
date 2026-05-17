@@ -8,7 +8,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
-from torchvision import datasets, models, transforms
+from torchvision import models, transforms
 
 DATASET_ROOT = r"C:\Users\zudae\Desktop\диплом1\model3\fashion-dataset\dataset_train_ready"
 OUTPUT_DIR = r"C:\Users\zudae\Desktop\диплом1\model3\trained_model"
@@ -29,32 +29,47 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 class FilteredImageFolder(Dataset):
     def __init__(self, root: Path, transform, used_classes: Sequence[str]):
-        self.base = datasets.ImageFolder(str(root), transform=transform)
+        self.root = Path(root)
+        self.transform = transform
         self.used_classes = list(used_classes)
-        self.class_to_idx_new = {c: i for i, c in enumerate(self.used_classes)}
+        self.class_to_idx = {c: i for i, c in enumerate(self.used_classes)}
+        self.idx_to_class = {i: c for c, i in self.class_to_idx.items()}
+        self.class_names_used = list(self.used_classes)
 
-        keep_old_indices = {
-            self.base.class_to_idx[c]
-            for c in self.used_classes
-            if c in self.base.class_to_idx
-        }
+        self.samples: List[Tuple[Path, int]] = []
+        self.empty_used_classes: List[str] = []
+        valid_ext = {".jpg", ".jpeg", ".png", ".webp"}
 
-        self.samples: List[tuple[str, int]] = []
-        for path, old_target in self.base.samples:
-            if old_target in keep_old_indices:
-                class_name = self.base.classes[old_target]
-                self.samples.append((path, self.class_to_idx_new[class_name]))
+        for class_name in self.used_classes:
+            class_dir = self.root / class_name
+            class_index = self.class_to_idx[class_name]
+
+            if not class_dir.exists() or not class_dir.is_dir():
+                self.empty_used_classes.append(class_name)
+                continue
+
+            class_files = sorted(
+                p for p in class_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in valid_ext
+            )
+
+            if not class_files:
+                self.empty_used_classes.append(class_name)
+                continue
+
+            for path in class_files:
+                self.samples.append((path, class_index))
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int):
         path, target = self.samples[idx]
-        sample = self.base.loader(path)
-        if self.base.transform is not None:
-            sample = self.base.transform(sample)
+        with Image.open(path) as img:
+            sample = img.convert("RGB")
+        if self.transform is not None:
+            sample = self.transform(sample)
         return sample, target
-
 
 @dataclass
 class EpochResult:
@@ -231,6 +246,11 @@ def main():
 
     train_ds = FilteredImageFolder(dataset_root / "train", train_tf, used_classes)
     val_ds = FilteredImageFolder(dataset_root / "val", val_tf, used_classes)
+
+    for cls in train_ds.empty_used_classes:
+        print(f"[WARN] No train files found for used class: {cls}. Class will be effectively skipped in train split.")
+    for cls in val_ds.empty_used_classes:
+        print(f"[WARN] No val files found for used class: {cls}. Class will be effectively skipped in val split.")
 
     if len(train_ds) == 0 or len(val_ds) == 0:
         raise RuntimeError(f"Empty filtered datasets: train={len(train_ds)} val={len(val_ds)}")
