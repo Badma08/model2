@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
 DATASET_ROOT = r"C:\Users\zudae\Desktop\диплом1\model3\fashion-dataset\dataset_train_ready"
-OUTPUT_DIR = r"C:\Users\zudae\Desktop\диплом1\model3\trained_model"
+OUTPUT_DIR = r"C:\Users\zudae\Desktop\диплом1\model3\trained_model_full_image"
 IMAGE_SIZE = 224
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -230,16 +230,14 @@ def main():
         print(f"  {c}: train={counts[c]['train']}, val={counts[c]['val']}")
 
     train_tf = transforms.Compose([
-        transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.75, 1.0)),
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
     val_tf = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(IMAGE_SIZE),
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
@@ -328,7 +326,11 @@ def main():
                 print("Early stopping triggered.")
                 break
 
-    with (output_dir / "class_names_used.json").open("w", encoding="utf-8") as f:
+    class_names_used_path = output_dir / "class_names_used.json"
+    with class_names_used_path.open("w", encoding="utf-8") as f:
+        json.dump(used_classes, f, ensure_ascii=False, indent=2)
+    labels_path = output_dir / "clothing_labels.json"
+    with labels_path.open("w", encoding="utf-8") as f:
         json.dump(used_classes, f, ensure_ascii=False, indent=2)
 
     save_training_log(logs, output_dir / "training_log.csv")
@@ -339,6 +341,22 @@ def main():
     best_model.classifier[-1] = nn.Linear(in_features, len(used_classes))
     best_model.load_state_dict(torch.load(output_dir / "best_model.pth", map_location=device))
     best_model.to(device)
+    best_model.eval()
+
+    onnx_path = output_dir / "clothing_classifier.onnx"
+    dummy_input = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE).to(device)
+    torch.onnx.export(
+        best_model,
+        dummy_input,
+        str(onnx_path),
+        input_names=["input"],
+        output_names=["output"],
+        opset_version=12,
+        dynamic_axes={
+            "input": {0: "batch_size"},
+            "output": {0: "batch_size"},
+        },
+    )
 
     y_true, y_pred = evaluate_and_collect(best_model, val_loader, device)
     cm = confusion_matrix(y_true, y_pred, labels=list(range(len(used_classes))))
@@ -366,6 +384,7 @@ def main():
     model_info = {
         "model_name": "mobilenet_v3_small",
         "image_size": IMAGE_SIZE,
+        "preprocessing": "Resize((224, 224)) without crop",
         "used_classes": used_classes,
         "skipped_classes": skipped_classes,
         "train_size": len(train_ds),
@@ -373,10 +392,19 @@ def main():
         "best_val_accuracy": best_val_acc,
         "epochs_completed": len(logs),
         "device": str(device),
+        "export_format": "onnx",
+        "onnx_path": str(onnx_path),
+        "labels_path": str(labels_path),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     with (output_dir / "model_info.json").open("w", encoding="utf-8") as f:
         json.dump(model_info, f, ensure_ascii=False, indent=2)
+
+    print("Training finished.")
+    print(f"Best val accuracy: {best_val_acc:.6f}")
+    print(f"Saved to: {output_dir}")
+    print(f"ONNX model saved to: {onnx_path}")
+    print(f"Labels saved to: {labels_path}")
 
 
 if __name__ == "__main__":
